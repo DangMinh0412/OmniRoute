@@ -17,7 +17,31 @@ function makeTempDir(prefix) {
 }
 
 function removePath(targetPath) {
-  fs.rmSync(targetPath, { recursive: true, force: true });
+  // Windows temp-dir cleanup race: a sandbox child process (docker/node) may
+  // still hold a handle to the temp dir for a few ms after the test body
+  // finishes, so a single rmSync can throw EPERM in teardown even though the
+  // test itself passed. Retry briefly, then give up quietly — the OS reclaims
+  // its own temp dir regardless. This is teardown hygiene only; it asserts
+  // nothing and touches no product code.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      return;
+    } catch (err) {
+      const code = (err && typeof err === "object" && "code" in err && err.code) || "";
+      if ((code === "EPERM" || code === "EBUSY" || code === "ENOTEMPTY") && attempt < 4) {
+        // Busy-wait a short, bounded spell for the handle to release.
+        const until = Date.now() + 100;
+        while (Date.now() < until) {
+          /* brief backoff before retrying the temp-dir removal */
+        }
+        continue;
+      }
+      if (code === "ENOENT") return; // already gone — success
+      if (code === "EPERM" || code === "EBUSY" || code === "ENOTEMPTY") return; // OS will reclaim
+      throw err;
+    }
+  }
 }
 
 async function importFresh(modulePath) {

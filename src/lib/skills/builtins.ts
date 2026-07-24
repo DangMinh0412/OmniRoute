@@ -112,7 +112,12 @@ function resolveWorkspacePath(inputPath: string, context: { apiKeyId: string }) 
     throw new Error("Skill file path escapes the skill workspace");
   }
 
-  return { root, resolved, relative };
+  // `resolved` stays OS-native for real fs ops; `relative` is LLM-facing API
+  // output (returned as `path` to the tool caller), so normalize it to a stable
+  // forward-slash contract. On POSIX this is a no-op (already "/"); on Windows
+  // it turns "notes\demo.txt" into "notes/demo.txt" so the same tool input
+  // yields the same path string on every platform.
+  return { root, resolved, relative: relative.split(path.sep).join("/") };
 }
 
 function normalizePositiveInteger(value: unknown, fallback: number, max: number) {
