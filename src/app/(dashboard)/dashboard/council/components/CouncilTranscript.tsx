@@ -56,6 +56,56 @@ export function CouncilTranscript({ rounds }: CouncilTranscriptProps) {
               </article>
             ))}
           </div>
+
+          {round.toolActivity && round.toolActivity.length > 0 && (
+            <div className="mt-3 border-t border-border/60 pt-3">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                {t("toolActivityHeading")}
+              </p>
+              <ul className="space-y-1">
+                {round.toolActivity.map((entry, i) => (
+                  <li
+                    key={`${entry.model}-${entry.name}-${entry.iteration}-${entry.kind}-${i}`}
+                    className="flex items-center gap-2 text-xs text-text-muted"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={
+                        entry.kind === "denied"
+                          ? "text-red-400"
+                          : entry.kind === "result"
+                            ? entry.ok
+                              ? "text-green-400"
+                              : "text-amber-400"
+                            : "text-text-muted"
+                      }
+                    >
+                      {entry.kind === "denied"
+                        ? "⛔"
+                        : entry.kind === "result"
+                          ? entry.ok
+                            ? "✓"
+                            : "✕"
+                          : "→"}
+                    </span>
+                    <span className="font-mono">
+                      {entry.kind === "call"
+                        ? t("toolCallLabel", { model: entry.model, tool: entry.name })
+                        : entry.kind === "denied"
+                          ? t("toolDeniedLabel", {
+                              model: entry.model,
+                              tool: entry.name,
+                              reason: entry.reason ?? "",
+                            })
+                          : entry.ok
+                            ? t("toolResultOk", { model: entry.model, tool: entry.name })
+                            : t("toolResultFail", { model: entry.model, tool: entry.name })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
       ))}
     </div>

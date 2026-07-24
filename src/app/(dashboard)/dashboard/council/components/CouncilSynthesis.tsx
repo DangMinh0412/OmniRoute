@@ -16,9 +16,20 @@ export type CouncilSynthesisProps = {
   done: CouncilDoneSummary | null;
   /** True once at least one round or synthesis text exists. */
   hasContent: boolean;
+  /** Evaluator model that verified the draft (verifyPass mode), if any. */
+  verifyEvaluator?: string | null;
+  /** The evaluator's critique of the draft answer (verifyPass mode), if any. */
+  verifyCritique?: string;
 };
 
-export function CouncilSynthesis({ synthesis, judge, done, hasContent }: CouncilSynthesisProps) {
+export function CouncilSynthesis({
+  synthesis,
+  judge,
+  done,
+  hasContent,
+  verifyEvaluator,
+  verifyCritique,
+}: CouncilSynthesisProps) {
   const t = useTranslations("council");
 
   if (!hasContent) {
@@ -38,10 +49,18 @@ export function CouncilSynthesis({ synthesis, judge, done, hasContent }: Council
     >
       <header className="mb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-text-main">{t("synthesisHeading")}</h2>
-        {judge && (
-          <span className="text-xs text-text-muted">{t("synthesisJudge", { judge })}</span>
-        )}
+        {judge && <span className="text-xs text-text-muted">{t("synthesisJudge", { judge })}</span>}
       </header>
+      {verifyCritique && verifyCritique.trim().length > 0 && (
+        <details className="mb-3 rounded-md border border-border/60 bg-background/60 p-2">
+          <summary className="cursor-pointer text-xs font-medium text-text-muted">
+            {verifyEvaluator
+              ? t("verifyCritiqueHeadingBy", { evaluator: verifyEvaluator })
+              : t("verifyCritiqueHeading")}
+          </summary>
+          <p className="mt-2 whitespace-pre-wrap text-xs text-text-muted">{verifyCritique}</p>
+        </details>
+      )}
       <p className="whitespace-pre-wrap text-sm text-text-main">{synthesis}</p>
       {done && (
         <p className="mt-3 border-t border-border/60 pt-2 text-xs text-text-muted">

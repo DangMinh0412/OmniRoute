@@ -18,6 +18,14 @@ const DEFAULT_SANDBOX_TIMEOUT_MS =
 const SANDBOX_NETWORK_ENABLED =
   process.env.SKILLS_SANDBOX_NETWORK_ENABLED === "1" ||
   process.env.SKILLS_SANDBOX_NETWORK_ENABLED === "true";
+// Full-disk access (opt-in, OFF by default). When enabled, file_read/file_write
+// may target ABSOLUTE paths anywhere the OS process can reach — the operator has
+// explicitly traded the workspace jail for Claude-Code-style whole-machine
+// access. Default OFF keeps every path relative-and-jailed (prior behaviour).
+// The FORBIDDEN_PATH_SEGMENTS denylist (.env/.ssh/secrets/…) STILL applies even
+// with full disk on, so credential files are never casually read/overwritten.
+const FULL_DISK_ACCESS =
+  process.env.SKILLS_FULL_DISK_ACCESS === "1" || process.env.SKILLS_FULL_DISK_ACCESS === "true";
 const DEFAULT_COMMAND_IMAGE = "alpine:3.20";
 const DEFAULT_JS_IMAGE = "node:22-alpine";
 const DEFAULT_PYTHON_IMAGE = "python:3.12-alpine";
@@ -65,6 +73,29 @@ function getWorkspaceRoot(context: { apiKeyId: string }) {
 }
 
 function resolveWorkspacePath(inputPath: string, context: { apiKeyId: string }) {
+  // Full-disk mode (env-gated, OFF by default): the operator has explicitly
+  // opted the agent out of the workspace jail so it can read/write anywhere on
+  // the host — the "full disk access like Claude Code" the operator asked for.
+  // We STILL block the forbidden secret segments (.env/.ssh/.omniroute/.codex/…)
+  // even in full-disk mode: exposing credentials to a tool an LLM drives is a
+  // different, worse risk class than editing project files, and blocking it
+  // costs the operator nothing they actually wanted. Loopback enforcement +
+  // permission policy remain the primary gates in front of this.
+  if (FULL_DISK_ACCESS) {
+    const segments = inputPath.split(/[\\/]+/).filter(Boolean);
+    if (segments.some((segment) => FORBIDDEN_PATH_SEGMENTS.has(segment.toLowerCase()))) {
+      throw new Error("Skill file path contains a restricted segment");
+    }
+    // Absolute paths are honoured as-is; relative paths resolve against the
+    // process CWD (the project root) so "src/foo.ts" means what the operator expects.
+    const resolved = path.resolve(inputPath);
+    const segmentsResolved = resolved.split(/[\\/]+/).filter(Boolean);
+    if (segmentsResolved.some((segment) => FORBIDDEN_PATH_SEGMENTS.has(segment.toLowerCase()))) {
+      throw new Error("Skill file path contains a restricted segment");
+    }
+    return { root: path.parse(resolved).root, resolved, relative: resolved };
+  }
+
   if (path.isAbsolute(inputPath)) {
     throw new Error("Skill file paths must be relative to the skill workspace");
   }
@@ -388,14 +419,7 @@ export const builtinSkills: Record<string, SkillHandler> = {
   },
 
   web_fetch: async (input, context) => {
-    const {
-      url,
-      format,
-      depth,
-      wait_for_selector,
-      include_metadata,
-      provider,
-    } = input as {
+    const { url, format, depth, wait_for_selector, include_metadata, provider } = input as {
       url: string;
       format?: "markdown" | "html" | "links" | "screenshot";
       depth?: 0 | 1 | 2;

@@ -15,6 +15,23 @@ import { useCallback, useRef, useState } from "react";
 
 export type CouncilPanelAnswer = { model: string; text: string };
 
+/**
+ * One tool action taken by a panel member during a debate round (panelTools
+ * mode). `kind` mirrors the SSE event: a `call` (model invoked a tool), a
+ * `result` (tool ran, `ok` = success), or a `denied` (permission gate blocked
+ * it). Grouped under the round + keyed by model for per-member display.
+ */
+export type CouncilToolActivity = {
+  model: string;
+  kind: "call" | "result" | "denied";
+  name: string;
+  iteration: number;
+  /** Present on `result`: whether the sandboxed tool succeeded. */
+  ok?: boolean;
+  /** Present on `denied`: why the permission gate blocked the call. */
+  reason?: string;
+};
+
 export type CouncilRound = {
   round: number;
   /** Models invited to this round (from round_start). */
@@ -22,6 +39,8 @@ export type CouncilRound = {
   answers: CouncilPanelAnswer[];
   /** Consensus score if the debate converged and stopped at this round. */
   consensusScore?: number;
+  /** Tool actions taken by panel members this round (panelTools mode). */
+  toolActivity?: CouncilToolActivity[];
 };
 
 export type CouncilRunInput = {
@@ -31,6 +50,18 @@ export type CouncilRunInput = {
   judgeModel?: string;
   debateRounds?: number;
   consensusThreshold?: number;
+  /**
+   * Opt-in: let each panel member use tools (search / fetch / run code in a
+   * sandbox) before it speaks. Honoured only for loopback callers — a remote
+   * request is silently degraded to pure debate with a `warning` event.
+   */
+  panelTools?: boolean;
+  /**
+   * Opt-in: after the judge drafts an answer, an evaluator model critiques it
+   * and the judge refines it before finalizing (evaluator-optimizer). Off by
+   * default → single-shot synthesis.
+   */
+  verifyPass?: boolean;
 };
 
 export type CouncilDoneSummary = {
@@ -47,6 +78,12 @@ export type CouncilStreamState = {
   synthesis: string;
   done: CouncilDoneSummary | null;
   error: string | null;
+  /** Non-fatal notices (e.g. panelTools degraded to pure debate for a remote caller). */
+  warnings: string[];
+  /** Evaluator model running the verify pass, if enabled (verifyPass mode). */
+  verifyEvaluator: string | null;
+  /** The evaluator's critique of the judge's draft answer (verifyPass mode). */
+  verifyCritique: string;
 };
 
 const INITIAL: CouncilStreamState = {
@@ -56,6 +93,9 @@ const INITIAL: CouncilStreamState = {
   synthesis: "",
   done: null,
   error: null,
+  warnings: [],
+  verifyEvaluator: null,
+  verifyCritique: "",
 };
 
 type CouncilEvent = Record<string, unknown>;
@@ -74,10 +114,7 @@ export function extractSynthesisText(completion: unknown): string {
  * Fold a single parsed SSE event into prior state, returning the next state.
  * Pure and exported so the reducer is unit-testable without a live stream.
  */
-export function reduceCouncilEvent(
-  prev: CouncilStreamState,
-  ev: CouncilEvent
-): CouncilStreamState {
+export function reduceCouncilEvent(prev: CouncilStreamState, ev: CouncilEvent): CouncilStreamState {
   switch (ev.type) {
     case "round_start": {
       const round = Number(ev.round ?? 0);
@@ -101,13 +138,15 @@ export function reduceCouncilEvent(
       const score = Number(ev.score ?? 0);
       return {
         ...prev,
-        rounds: prev.rounds.map((r) =>
-          r.round === round ? { ...r, consensusScore: score } : r
-        ),
+        rounds: prev.rounds.map((r) => (r.round === round ? { ...r, consensusScore: score } : r)),
       };
     }
     case "synthesis_start":
       return { ...prev, judge: String(ev.judge ?? "") || null };
+    case "verify_start":
+      return { ...prev, verifyEvaluator: String(ev.evaluator ?? "") || null };
+    case "verify_critique":
+      return { ...prev, verifyCritique: String(ev.text ?? "") };
     case "token":
       return { ...prev, synthesis: prev.synthesis + String(ev.text ?? "") };
     case "synthesis": {
@@ -126,6 +165,32 @@ export function reduceCouncilEvent(
       };
     case "error":
       return { ...prev, error: String(ev.message ?? "council error") };
+    case "panel_tool_call":
+    case "panel_tool_result":
+    case "panel_tool_denied": {
+      const round = Number(ev.round ?? 0);
+      const entry: CouncilToolActivity = {
+        model: String(ev.model ?? ""),
+        kind:
+          ev.type === "panel_tool_result"
+            ? "result"
+            : ev.type === "panel_tool_denied"
+              ? "denied"
+              : "call",
+        name: String(ev.name ?? ""),
+        iteration: Number(ev.iteration ?? 0),
+        ...(typeof ev.ok === "boolean" ? { ok: ev.ok } : {}),
+        ...(typeof ev.reason === "string" ? { reason: ev.reason } : {}),
+      };
+      return {
+        ...prev,
+        rounds: prev.rounds.map((r) =>
+          r.round === round ? { ...r, toolActivity: [...(r.toolActivity ?? []), entry] } : r
+        ),
+      };
+    }
+    case "warning":
+      return { ...prev, warnings: [...prev.warnings, String(ev.message ?? "")] };
     default:
       return prev;
   }
@@ -160,6 +225,8 @@ export function useCouncilStream() {
     };
     if (input.models.length > 0) body.models = input.models;
     if (input.judgeModel) body.judgeModel = input.judgeModel;
+    if (input.panelTools) body.panelTools = true;
+    if (input.verifyPass) body.verifyPass = true;
     const debateTuning: Record<string, unknown> = {};
     if (typeof input.debateRounds === "number") debateTuning.debateRounds = input.debateRounds;
     if (typeof input.consensusThreshold === "number")

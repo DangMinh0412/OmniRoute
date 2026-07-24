@@ -21,7 +21,7 @@ import os from "os";
 const require = createRequire(import.meta.url);
 const childProcess = require("child_process") as typeof import("child_process");
 
-export type SandboxRuntimeId = "docker" | "apple" | "wsl" | "orbstack" | "podman";
+export type SandboxRuntimeId = "docker" | "apple" | "wsl" | "orbstack" | "podman" | "native";
 
 export interface SandboxConfig {
   cpuLimit: number;
@@ -50,7 +50,7 @@ export interface ContainerProvider {
     image: string,
     command: string[],
     sandboxId: string,
-    config: SandboxConfig,
+    config: SandboxConfig
   ): ResolvedContainerCommand;
   /** Build a kill/stop command for a running container. */
   killCommand: string;
@@ -69,8 +69,7 @@ const SANDBOX_NAME = (sandboxId: string) => `omniroute-${sandboxId}`;
  * test mocks on `spawn` (but not `spawnSync`) are not disturbed.
  */
 function probeCommand(binary: string): boolean {
-  const args =
-    process.platform === "win32" ? ["where", binary] : ["which", binary];
+  const args = process.platform === "win32" ? ["where", binary] : ["which", binary];
   const r = childProcess.spawnSync(args[0], args.slice(1), {
     encoding: "utf8",
     stdio: "ignore",
@@ -107,7 +106,7 @@ class DockerProvider implements ContainerProvider {
     image: string,
     command: string[],
     sandboxId: string,
-    config: SandboxConfig,
+    config: SandboxConfig
   ): ResolvedContainerCommand {
     const args = [
       "run",
@@ -164,7 +163,7 @@ class AppleContainerProvider implements ContainerProvider {
     image: string,
     command: string[],
     sandboxId: string,
-    config: SandboxConfig,
+    config: SandboxConfig
   ): ResolvedContainerCommand {
     const args = [
       "run",
@@ -219,7 +218,7 @@ class WslContainerProvider implements ContainerProvider {
     image: string,
     command: string[],
     sandboxId: string,
-    config: SandboxConfig,
+    config: SandboxConfig
   ): ResolvedContainerCommand {
     const args = [
       "run",
@@ -270,7 +269,7 @@ class OrbStackProvider implements ContainerProvider {
     image: string,
     command: string[],
     sandboxId: string,
-    config: SandboxConfig,
+    config: SandboxConfig
   ): ResolvedContainerCommand {
     // OrbStack wraps Docker inside a Linux VM.  We invoke the `orbstack`
     // binary which shims `docker` transparently.
@@ -323,7 +322,7 @@ class PodmanProvider implements ContainerProvider {
     image: string,
     command: string[],
     sandboxId: string,
-    config: SandboxConfig,
+    config: SandboxConfig
   ): ResolvedContainerCommand {
     const args = [
       "run",
@@ -362,6 +361,65 @@ class PodmanProvider implements ContainerProvider {
 }
 
 // ----------------------------------------------------------------
+//  NativeProvider  (DIRECT host execution — NO container isolation)
+// ----------------------------------------------------------------
+
+/**
+ * Runs the requested command DIRECTLY on the host machine, with no container,
+ * no resource caps, no filesystem jail, and no capability drops. This is the
+ * "run anything on my computer like Claude Code" surface the operator explicitly
+ * opted into.
+ *
+ * ⚠️ SECURITY: this provider removes the sandbox's entire containment layer. It
+ * is therefore:
+ *   - NEVER auto-detected / auto-selected. It is returned by `resolveProvider()`
+ *     ONLY when `SKILLS_ALLOW_NATIVE_EXEC` is explicitly enabled AND
+ *     `SKILLS_SANDBOX_RUNTIME=native` is set — two independent opt-ins.
+ *   - Guarded upstream by the destructive-command screen (`destructiveGuard.ts`)
+ *     applied in `SandboxRunner.run()` before any native spawn, and by the
+ *     loopback route gate + permission policy in front of that.
+ *
+ * `image` is ignored (there is no container to pull); `command[0]` is the binary
+ * and `command.slice(1)` its arguments. The runtime `readOnly` / network / cpu /
+ * memory config fields are inert here — the host does not enforce them.
+ */
+class NativeProvider implements ContainerProvider {
+  readonly id: SandboxRuntimeId = "native";
+  readonly displayName = "Native (host, no isolation)";
+  readonly killCommand = process.platform === "win32" ? "taskkill" : "kill";
+
+  detect(): boolean {
+    // Only "available" when the operator has explicitly enabled native exec.
+    // This keeps it out of any accidental auto-selection path.
+    return (
+      process.env.SKILLS_ALLOW_NATIVE_EXEC === "1" ||
+      process.env.SKILLS_ALLOW_NATIVE_EXEC === "true"
+    );
+  }
+
+  buildRun(
+    image: string,
+    command: string[],
+    _sandboxId: string,
+    _config: SandboxConfig
+  ): ResolvedContainerCommand {
+    void image;
+    void _sandboxId;
+    void _config;
+    const [binary, ...rest] = command;
+    return {
+      command: binary ?? "",
+      args: rest,
+      killArgs: (name) => ["kill", name],
+    };
+  }
+
+  buildKillArgs(name: string): string[] {
+    return ["kill", name];
+  }
+}
+
+// ----------------------------------------------------------------
 //  Registry & auto-detection
 // ----------------------------------------------------------------
 
@@ -371,10 +429,11 @@ export const ALL_PROVIDERS: ContainerProvider[] = [
   new WslContainerProvider(),
   new OrbStackProvider(),
   new PodmanProvider(),
+  new NativeProvider(),
 ];
 
 export const PROVIDER_BY_ID = new Map<SandboxRuntimeId, ContainerProvider>(
-  ALL_PROVIDERS.map((p) => [p.id, p]),
+  ALL_PROVIDERS.map((p) => [p.id, p])
 );
 
 /** Priority order for auto-detection on each platform. */
@@ -409,17 +468,14 @@ async function runDetection(): Promise<void> {
     ALL_PROVIDERS.map(async (provider) => {
       const ok = await Promise.resolve(provider.detect());
       detectionCache.set(provider.id, ok);
-    }),
+    })
   );
 }
 
-function normaliseRuntimeOverride(
-  raw: string | undefined,
-): SandboxRuntimeId | null {
+function normaliseRuntimeOverride(raw: string | undefined): SandboxRuntimeId | null {
   if (!raw || raw === "auto") return null;
   const lowered = raw.toLowerCase().trim();
-  if (PROVIDER_BY_ID.has(lowered as SandboxRuntimeId))
-    return lowered as SandboxRuntimeId;
+  if (PROVIDER_BY_ID.has(lowered as SandboxRuntimeId)) return lowered as SandboxRuntimeId;
   return null;
 }
 
@@ -440,16 +496,23 @@ export async function resolveProvider(): Promise<ContainerProvider> {
   }
   await detectionInFlight;
 
-  const override = normaliseRuntimeOverride(
-    process.env.SKILLS_SANDBOX_RUNTIME,
-  );
+  const override = normaliseRuntimeOverride(process.env.SKILLS_SANDBOX_RUNTIME);
   if (override) {
     const provider = PROVIDER_BY_ID.get(override)!;
-    if (detectionCache.get(provider.id)) return provider;
-    // Honour the explicit override even if detection failed — the user may
-    // be running inside an environment where the runtime is reachable but
-    // our probe failed (e.g. very locked-down CI).
-    return provider;
+    // SECURITY: `native` (host exec, no isolation) is the ONE runtime whose
+    // override is NOT honoured on faith. It requires the SECOND, independent
+    // opt-in (`SKILLS_ALLOW_NATIVE_EXEC`, surfaced as its detect()). Without
+    // that, setting `SKILLS_SANDBOX_RUNTIME=native` alone must NOT drop the
+    // container — fall through to safe auto-detection instead. Every other
+    // runtime keeps the "honour override even if the probe failed" behaviour
+    // (a locked-down CI may hide an installed docker/podman from the probe).
+    if (provider.id === "native") {
+      if (detectionCache.get("native")) return provider;
+      // native override requested but not enabled → ignore it, stay contained.
+    } else {
+      if (detectionCache.get(provider.id)) return provider;
+      return provider;
+    }
   }
 
   for (const id of platformPriority()) {
@@ -469,7 +532,7 @@ export function _resetProviderCacheForTests(): void {
  */
 export function buildKillCommand(
   provider: ContainerProvider,
-  sandboxId: string,
+  sandboxId: string
 ): { command: string; args: string[] } {
   const name = SANDBOX_NAME(sandboxId);
   return {

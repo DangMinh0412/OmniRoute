@@ -55,6 +55,7 @@ export const LOCAL_ONLY_API_PREFIXES: ReadonlyArray<string> = [
   "/api/discovery/", // Discovery tool (opt-in provider scanner): the scan route makes outbound probes to provider endpoints (SSRF-adjacent) and the whole surface is an admin research tool — strict-loopback only, no manage-scope bypass (NOT in LOCAL_ONLY_MANAGE_SCOPE_BYPASS_PREFIXES). See _tasks/features-v3.8.42/gaps/DISCOVERY_TOOL_DESIGN.md.
   VNC_ROUTE_PREFIX, // #7892: /api/vnc-session/* spawns Docker containers via child_process.spawn (src/lib/vncSession/service.ts) — RCE-via-tunnel surface (Hard Rules #15 + #17), same CVE class (GHSA-fhh6-4qxv-rpqj).
   "/api/acp/agents", // ACP custom-agent registry: POST registers a client-chosen `binary`; GET / POST {action:"refresh"} runs detectInstalledAgents() -> execFileSync(probe.command, probe.args, { shell }) transitively (src/lib/acp/registry.ts) — RCE-via-tunnel surface (Hard Rules #15 + #17, #7948)
+  "/api/v1/agent", // Agentic ReAct loop: the model can emit eval_code / execute_command tool calls, which run through src/lib/agentic/toolRegistry → src/lib/skills/builtins → sandboxRunner.run → childProcess.spawn("docker", …). The spawn is TRANSITIVE (route.ts does not import child_process directly, so the source-scan subcheck of check-route-guard-membership cannot see it), but the RCE-via-tunnel surface is identical to /api/vnc-session and /api/local/ (both spawn docker and are LOCAL_ONLY). Loopback enforcement runs before auth, so a leaked JWT over a tunnel cannot drive a host container spawn (Hard Rules #15 + #17).
 ];
 
 /**
@@ -174,9 +175,7 @@ export function isPrivateLanHost(hostHeader: string | null): boolean {
  *   triggers the auto-update flow (spawns git checkout + npm install + pm2).
  *   Hard Rules #15/#17 still apply to POST.
  */
-export const LOCAL_ONLY_API_GET_EXEMPTIONS: ReadonlySet<string> = new Set([
-  "/api/system/version",
-]);
+export const LOCAL_ONLY_API_GET_EXEMPTIONS: ReadonlySet<string> = new Set(["/api/system/version"]);
 
 /** Safe HTTP methods that can be exempted for read-only paths. */
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

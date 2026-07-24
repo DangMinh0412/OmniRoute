@@ -8,9 +8,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { reduceCouncilEvent, extractSynthesisText } = await import(
-  "../../src/app/(dashboard)/dashboard/council/useCouncilStream.ts"
-);
+const { reduceCouncilEvent, extractSynthesisText } =
+  await import("../../src/app/(dashboard)/dashboard/council/useCouncilStream.ts");
 
 type State = ReturnType<typeof reduceCouncilEvent>;
 
@@ -21,6 +20,9 @@ const INITIAL: State = {
   synthesis: "",
   done: null,
   error: null,
+  warnings: [],
+  verifyEvaluator: null,
+  verifyCritique: "",
 };
 
 function fold(events: Array<Record<string, unknown>>, from: State = INITIAL): State {
@@ -95,6 +97,80 @@ test("done: records the run summary", () => {
 test("error: records the message", () => {
   const s = fold([{ type: "error", message: "boom" }]);
   assert.equal(s.error, "boom");
+});
+
+test("panel_tool_call: appends a call entry to the matching round's toolActivity", () => {
+  const s = fold([
+    { type: "round_start", round: 0, models: ["a", "b"] },
+    {
+      type: "panel_tool_call",
+      round: 0,
+      model: "a",
+      name: "web_search",
+      iteration: 0,
+      arguments: { query: "x" },
+    },
+  ]);
+  assert.equal(s.rounds[0].toolActivity?.length, 1);
+  const entry = s.rounds[0].toolActivity![0];
+  assert.equal(entry.kind, "call");
+  assert.equal(entry.model, "a");
+  assert.equal(entry.name, "web_search");
+});
+
+test("panel_tool_result: records ok flag; failure preserves ok:false", () => {
+  const s = fold([
+    { type: "round_start", round: 0, models: ["a"] },
+    { type: "panel_tool_result", round: 0, model: "a", name: "eval_code", iteration: 1, ok: true },
+    { type: "panel_tool_result", round: 0, model: "a", name: "eval_code", iteration: 2, ok: false },
+  ]);
+  const acts = s.rounds[0].toolActivity!;
+  assert.equal(acts.length, 2);
+  assert.equal(acts[0].kind, "result");
+  assert.equal(acts[0].ok, true);
+  assert.equal(acts[1].ok, false);
+});
+
+test("panel_tool_denied: records the reason", () => {
+  const s = fold([
+    { type: "round_start", round: 0, models: ["a"] },
+    {
+      type: "panel_tool_denied",
+      round: 0,
+      model: "a",
+      name: "file_write",
+      iteration: 0,
+      reason: "readonly policy",
+    },
+  ]);
+  const entry = s.rounds[0].toolActivity![0];
+  assert.equal(entry.kind, "denied");
+  assert.equal(entry.reason, "readonly policy");
+});
+
+test("panel_tool_* for an unknown round is inert (no matching round)", () => {
+  const s = fold([
+    { type: "round_start", round: 0, models: ["a"] },
+    { type: "panel_tool_call", round: 5, model: "a", name: "web_search", iteration: 0 },
+  ]);
+  assert.equal(s.rounds[0].toolActivity, undefined);
+});
+
+test("warning: accumulates messages at the top level", () => {
+  const s = fold([
+    { type: "warning", message: "panelTools disabled — non-loopback" },
+    { type: "warning", message: "second warning" },
+  ]);
+  assert.deepEqual(s.warnings, ["panelTools disabled — non-loopback", "second warning"]);
+});
+
+test("verify_start + verify_critique: records the evaluator and its critique", () => {
+  const s = fold([
+    { type: "verify_start", evaluator: "p/critic" },
+    { type: "verify_critique", text: "claim 2 is unsupported" },
+  ]);
+  assert.equal(s.verifyEvaluator, "p/critic");
+  assert.equal(s.verifyCritique, "claim 2 is unsupported");
 });
 
 test("unknown event type: state is returned unchanged (inert)", () => {

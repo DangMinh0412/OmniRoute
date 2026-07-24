@@ -402,45 +402,36 @@ test("sandboxRunner kill/killAll fallback naming matches containerProvider's SAN
 //  Container Provider Unit Tests
 // -------------------------------------------------------------
 
-test("containerProvider: all five providers registered", () => {
+test("containerProvider: all container providers + native registered", () => {
   // Dynamic import to avoid polluting the sandbox module's state
   return importFresh("src/lib/skills/containerProvider.ts").then((mod) => {
-    assert.ok(mod.ALL_PROVIDERS.length === 5);
+    // Five container runtimes + the env-gated native (host) provider.
+    assert.ok(mod.ALL_PROVIDERS.length === 6);
     assert.deepStrictEqual(
       mod.ALL_PROVIDERS.map((p) => p.id),
-      ["docker", "apple", "wsl", "orbstack", "podman"],
+      ["docker", "apple", "wsl", "orbstack", "podman", "native"]
     );
     assert.ok(mod.PROVIDER_BY_ID.has("docker"));
     assert.ok(mod.PROVIDER_BY_ID.has("apple"));
     assert.ok(mod.PROVIDER_BY_ID.has("wsl"));
     assert.ok(mod.PROVIDER_BY_ID.has("orbstack"));
     assert.ok(mod.PROVIDER_BY_ID.has("podman"));
+    // Native is registered but never auto-selected (see resolveProvider tests).
+    assert.ok(mod.PROVIDER_BY_ID.has("native"));
   });
 });
 
 test("containerProvider: platformPriority returns correct order per OS", () => {
   return importFresh("src/lib/skills/containerProvider.ts").then((mod) => {
-    const originalPlatform = Object.getOwnPropertyDescriptor(
-      process,
-      "platform",
-    );
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
     // darwin
     Object.defineProperty(process, "platform", { value: "darwin" });
-    assert.deepStrictEqual(mod.platformPriority(), [
-      "apple",
-      "orbstack",
-      "podman",
-      "docker",
-    ]);
+    assert.deepStrictEqual(mod.platformPriority(), ["apple", "orbstack", "podman", "docker"]);
 
     // win32
     Object.defineProperty(process, "platform", { value: "win32" });
-    assert.deepStrictEqual(mod.platformPriority(), [
-      "wsl",
-      "docker",
-      "podman",
-    ]);
+    assert.deepStrictEqual(mod.platformPriority(), ["wsl", "docker", "podman"]);
 
     // linux
     Object.defineProperty(process, "platform", { value: "linux" });
@@ -448,11 +439,7 @@ test("containerProvider: platformPriority returns correct order per OS", () => {
 
     // Restore
     if (originalPlatform) {
-      Object.defineProperty(
-        process,
-        "platform",
-        originalPlatform,
-      );
+      Object.defineProperty(process, "platform", originalPlatform);
     }
   });
 });
@@ -467,25 +454,14 @@ test("containerProvider: buildRun produces run as args[0] for all providers", ()
       readOnly: true,
     };
     for (const provider of mod.ALL_PROVIDERS) {
-      const resolved = provider.buildRun(
-        "alpine",
-        ["echo", "hi"],
-        "test-id",
-        config,
-      );
-      assert.equal(
-        resolved.args[0],
-        "run",
-        `${provider.id}: args[0] must be "run"`,
-      );
-      assert.ok(
-        resolved.args.includes("--rm"),
-        `${provider.id}: should include --rm`,
-      );
-      assert.ok(
-        resolved.args.includes("alpine"),
-        `${provider.id}: should include image`,
-      );
+      // The native (host) provider intentionally has no container semantics —
+      // it spawns command[0] directly, so "run"/"--rm"/image assertions don't
+      // apply. Its behaviour is covered by the native-exec-guard test.
+      if (provider.id === "native") continue;
+      const resolved = provider.buildRun("alpine", ["echo", "hi"], "test-id", config);
+      assert.equal(resolved.args[0], "run", `${provider.id}: args[0] must be "run"`);
+      assert.ok(resolved.args.includes("--rm"), `${provider.id}: should include --rm`);
+      assert.ok(resolved.args.includes("alpine"), `${provider.id}: should include image`);
       // killArgs must return something callable
       const kill = resolved.killArgs("test-cont");
       assert.ok(Array.isArray(kill), `${provider.id}: killArgs returns array`);
@@ -504,6 +480,7 @@ test("containerProvider: buildKillArgs returns kill|stop for cleanup", () => {
       ["wsl", "kill"],
       ["orbstack", "kill"],
       ["podman", "kill"],
+      ["native", "kill"],
     ]);
     for (const provider of mod.ALL_PROVIDERS) {
       const expectedVerb = verbs.get(provider.id);
@@ -555,9 +532,7 @@ test("containerProvider: resolveProvider falls back to docker when no runtime in
   // Auto-detect walks platform priority â€” if nothing is installed we
   // always land on docker as the fallback.
   const provider = await mod.resolveProvider();
-  assert.ok(
-    ["docker", "apple", "wsl", "podman", "orbstack"].includes(provider.id),
-  );
+  assert.ok(["docker", "apple", "wsl", "podman", "orbstack"].includes(provider.id));
   // Ensure the fallback is always docker when probes fail
   // (this test is best-effort â€” on a host with docker installed,
   //  the auto-detect will legitimately pick docker)

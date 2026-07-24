@@ -8,6 +8,7 @@ import {
   type SandboxConfig,
   type SandboxRuntimeId,
 } from "./containerProvider.ts";
+import { screenCommand } from "./destructiveGuard.ts";
 
 const require = createRequire(import.meta.url);
 const childProcess = require("child_process") as typeof import("child_process");
@@ -74,6 +75,27 @@ class SandboxRunner {
     const startTime = Date.now();
     const config = { ...this.config, ...configOverride };
     const provider = await this.getProvider();
+
+    // Native (host) execution has no container to contain the blast radius, so
+    // the destructive-command guard is the last line of defense. Screen the
+    // ACTUAL command (command[0] + args) before spawning. Container runtimes
+    // skip this — the container already isolates the host. Pure + cheap.
+    if (provider.id === "native") {
+      const [binary, ...rest] = command;
+      const verdict = screenCommand(binary ?? "", rest);
+      if (verdict.blocked) {
+        return {
+          id: sandboxId,
+          runtime: provider.id,
+          exitCode: -1,
+          stdout: "",
+          stderr: `Blocked by destructive-command guard [${verdict.rule}]: ${verdict.reason}`,
+          duration: Date.now() - startTime,
+          killed: false,
+        };
+      }
+    }
+
     const resolved = provider.buildRun(image, command, sandboxId, config);
 
     return new Promise((resolve) => {

@@ -11100,7 +11100,19 @@
     "emptyState": "The council's deliberation will appear here.",
     "errorPanelFailed": "All panel models failed to answer. Check that at least one provider is connected.",
     "errorGeneric": "The council run failed. See details below.",
-    "doneSummary": "{rounds} round(s), {answers} answer(s), {seconds}s"
+    "doneSummary": "{rounds} round(s), {answers} answer(s), {seconds}s",
+    "panelToolsLabel": "Let the panel use tools",
+    "panelToolsHelp": "Each model can search, fetch, and run code in a sandbox before it answers — so it debates from gathered evidence. Loopback-only for security; remote requests fall back to pure debate.",
+    "toolActivityHeading": "Tool activity",
+    "toolCallLabel": "{model} called {tool}",
+    "toolResultOk": "{model} · {tool} succeeded",
+    "toolResultFail": "{model} · {tool} failed",
+    "toolDeniedLabel": "{model} · {tool} denied ({reason})",
+    "warningsHeading": "Warnings",
+    "verifyPassLabel": "Verify the final answer",
+    "verifyPassHelp": "The judge writes a draft, an evaluator model critiques it for errors and gaps, then the judge refines it into the final answer (evaluator-optimizer). Costs two extra model calls.",
+    "verifyCritiqueHeading": "Reviewer critique",
+    "verifyCritiqueHeadingBy": "Reviewer critique (by {evaluator})"
   },
   "agentSkills": {
     "catalog": {

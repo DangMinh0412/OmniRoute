@@ -28,6 +28,8 @@ export default function CouncilPageClient() {
   const [judge, setJudge] = useState("");
   const [rounds, setRounds] = useState(2);
   const [consensus, setConsensus] = useState(0.85);
+  const [panelTools, setPanelTools] = useState(false);
+  const [verifyPass, setVerifyPass] = useState(false);
 
   const onRun = () => {
     const models = modelsRaw
@@ -40,6 +42,8 @@ export default function CouncilPageClient() {
       judgeModel: judge.trim() || undefined,
       debateRounds: rounds,
       consensusThreshold: consensus,
+      panelTools,
+      verifyPass,
     });
   };
 
@@ -61,6 +65,10 @@ export default function CouncilPageClient() {
         onRounds={setRounds}
         consensus={consensus}
         onConsensus={setConsensus}
+        panelTools={panelTools}
+        onPanelTools={setPanelTools}
+        verifyPass={verifyPass}
+        onVerifyPass={setVerifyPass}
         running={state.running}
         onRun={onRun}
         onStop={stop}
@@ -76,6 +84,20 @@ export default function CouncilPageClient() {
         </div>
       )}
 
+      {state.warnings.length > 0 && (
+        <div
+          role="status"
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300"
+        >
+          <p className="mb-1 font-medium">{t("warningsHeading")}</p>
+          <ul className="list-disc space-y-0.5 pl-5">
+            {state.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <CouncilTranscript rounds={state.rounds} />
 
       <CouncilSynthesis
@@ -83,6 +105,8 @@ export default function CouncilPageClient() {
         judge={state.judge}
         done={state.done}
         hasContent={state.rounds.length > 0 || state.synthesis.length > 0}
+        verifyEvaluator={state.verifyEvaluator}
+        verifyCritique={state.verifyCritique}
       />
     </div>
   );

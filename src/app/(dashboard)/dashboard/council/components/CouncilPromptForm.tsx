@@ -20,6 +20,10 @@ export type CouncilPromptFormProps = {
   onRounds: (v: number) => void;
   consensus: number;
   onConsensus: (v: number) => void;
+  panelTools: boolean;
+  onPanelTools: (v: boolean) => void;
+  verifyPass: boolean;
+  onVerifyPass: (v: boolean) => void;
   running: boolean;
   onRun: () => void;
   onStop: () => void;
@@ -108,11 +112,41 @@ export function CouncilPromptForm(props: CouncilPromptFormProps) {
             step={0.05}
             className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-text-main focus:border-primary focus:outline-none"
             value={props.consensus}
-            onChange={(e) => props.onConsensus(Math.max(0, Math.min(2, Number(e.target.value) || 0)))}
+            onChange={(e) =>
+              props.onConsensus(Math.max(0, Math.min(2, Number(e.target.value) || 0)))
+            }
             disabled={props.running}
           />
           <p className="text-xs text-text-muted">{t("consensusHelp")}</p>
         </div>
+      </div>
+
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm font-medium text-text-main">
+          <input
+            type="checkbox"
+            className="h-4 w-4 rounded border-border bg-background text-primary focus:ring-primary"
+            checked={props.panelTools}
+            onChange={(e) => props.onPanelTools(e.target.checked)}
+            disabled={props.running}
+          />
+          {t("panelToolsLabel")}
+        </label>
+        <p className="text-xs text-text-muted">{t("panelToolsHelp")}</p>
+      </div>
+
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm font-medium text-text-main">
+          <input
+            type="checkbox"
+            className="h-4 w-4 rounded border-border bg-background text-primary focus:ring-primary"
+            checked={props.verifyPass}
+            onChange={(e) => props.onVerifyPass(e.target.checked)}
+            disabled={props.running}
+          />
+          {t("verifyPassLabel")}
+        </label>
+        <p className="text-xs text-text-muted">{t("verifyPassHelp")}</p>
       </div>
 
       <div className="flex flex-wrap gap-2">

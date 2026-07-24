@@ -19,12 +19,7 @@
  *
  * Reuses collectPanel, extractPanelText, appendUserTurn from fusion.ts (DRY).
  */
-import {
-  collectPanel,
-  extractPanelText,
-  appendUserTurn,
-  FUSION_DEFAULTS,
-} from "./fusion.ts";
+import { collectPanel, extractPanelText, appendUserTurn, FUSION_DEFAULTS } from "./fusion.ts";
 import type { FusionTuning } from "./fusion.ts";
 import { errorResponse, sanitizeErrorMessage } from "../utils/error.ts";
 import type { ComboLogger, HandleSingleModel } from "./combo/types.ts";
@@ -45,6 +40,15 @@ export const DEBATE_DEFAULTS = {
   // burn tokens re-confirming agreement. Set to a value > 1 to disable early stop
   // and always run the full `debateRounds`. Default 0.85 = "strong agreement".
   consensusThreshold: 0.85,
+  // Devil's-advocate fraction (0..1): the share of the panel that is assigned an
+  // adversarial stance in debate rounds (R>=1) to counter conformity/sycophancy —
+  // the primary failure mode named by "Should we be going MAD?" (arXiv 2311.17371),
+  // where debating models drift into agreement that does NOT beat plain ensembling.
+  // A dissent quota keeps genuine disagreement alive so consensus is earned, not
+  // conformist. 0 = disabled (every model gets the neutral refine prompt → prior
+  // behaviour). Default 0 for zero-regression; a caller opts in (e.g. 0.34 ≈ one
+  // third of the panel argues the strongest opposing case each round).
+  devilsAdvocateFraction: 0,
 } as const;
 
 export type DebateTuning = FusionTuning & {
@@ -55,6 +59,11 @@ export type DebateTuning = FusionTuning & {
    * because the panel has converged. Values > 1 disable early stop. Default 0.85.
    */
   consensusThreshold?: number;
+  /**
+   * Fraction (0..1) of the panel assigned a devil's-advocate stance each debate
+   * round to counter conformity (arXiv 2311.17371). 0 disables (default).
+   */
+  devilsAdvocateFraction?: number;
 };
 
 /** One panel member's contribution for a single round. */
@@ -81,32 +90,70 @@ export type HandleDebateChatOptions = {
 // ---------------------------------------------------------------------------
 
 /**
+ * A debater's stance for a debate round. `standard` is the collaborative
+ * refine-and-rebut role; `devils_advocate` is the contrarian role assigned to a
+ * minority of the panel to counter premature convergence.
+ */
+export type DebateStance = "standard" | "devils_advocate";
+
+/**
  * Prompt injected before round R (R >= 1). Each model sees all prior-round
  * answers anonymized as "Peer N". Asks the model to:
  *   (a) acknowledge points it agrees with
  *   (b) rebut specific factual / logical errors it sees
  *   (c) refine or defend its own position
  *
+ * When `stance` is `devils_advocate`, the collaborative framing is replaced with
+ * an adversarial one: the model must actively challenge the emerging consensus,
+ * surface overlooked failure modes, and resist agreeing just to agree. This is
+ * the direct countermeasure to the conformity / sycophancy failure mode that
+ * research ("Should we be going MAD?", arXiv 2311.17371) identifies as the reason
+ * naive multi-agent debate often fails to beat self-consistency: deliberately
+ * adjusting panel agreement levels is what lets debate surpass non-debate
+ * protocols. A minority of contrarians keeps the debate honest without derailing
+ * it (the judge still weighs substance, not stance).
+ *
  * Never reveals model identities — weights substance over brand reputation.
  */
 export function buildDebateRoundPrompt(
   priorAnswers: PanelAnswer[],
   roundNum: number,
-  totalRounds: number
+  totalRounds: number,
+  stance: DebateStance = "standard"
 ): string {
-  const peers = priorAnswers
-    .map((a, i) => `[Peer ${i + 1}]\n${a.text}`)
-    .join("\n\n");
+  const peers = priorAnswers.map((a, i) => `[Peer ${i + 1}]\n${a.text}`).join("\n\n");
 
-  return [
+  const header = [
     `You are participating in a structured expert debate (Round ${roundNum} of ${totalRounds - 1}).`,
     "",
     `${priorAnswers.length} peers have answered the user's question independently. Their responses are anonymized below.`,
     "",
-    "Your task in this round:",
-    "1. AGREEMENTS — briefly identify specific points from the peers you agree with and why.",
-    "2. REBUTTALS — identify any factual errors, logical gaps, or missing nuance in the peer responses. Be specific and precise; vague disagreement is unhelpful.",
-    "3. REFINEMENT — revise, defend, or expand your own answer in light of the debate so far. If peers identified a genuine error in your prior reasoning, correct it openly.",
+  ];
+
+  const task =
+    stance === "devils_advocate"
+      ? [
+          "Your role this round is DEVIL'S ADVOCATE. Your job is NOT to agree — it is to",
+          "stress-test the emerging consensus so a wrong answer cannot survive by popularity:",
+          "1. CHALLENGE — attack the strongest shared claim among the peers. Assume it is",
+          "   subtly wrong and argue why: hidden assumptions, edge cases, counter-examples,",
+          "   failure modes, or evidence the panel is taking on faith.",
+          "2. STEELMAN THE MINORITY — if one peer disagrees with the rest, make the strongest",
+          "   possible case FOR that dissent before dismissing it.",
+          "3. POSITION — give your own answer, but do not soften a correct, unpopular",
+          "   conclusion to match the group. Agree only where agreement genuinely survives",
+          "   scrutiny; say so explicitly when it does.",
+        ]
+      : [
+          "Your task in this round:",
+          "1. AGREEMENTS — briefly identify specific points from the peers you agree with and why.",
+          "2. REBUTTALS — identify any factual errors, logical gaps, or missing nuance in the peer responses. Be specific and precise; vague disagreement is unhelpful.",
+          "3. REFINEMENT — revise, defend, or expand your own answer in light of the debate so far. If peers identified a genuine error in your prior reasoning, correct it openly.",
+        ];
+
+  return [
+    ...header,
+    ...task,
     "",
     "Do NOT mention that this is a multi-model system. Write as a single expert refining their position.",
     "Do NOT simply restate what peers said — add value through analysis, correction, or synthesis.",
@@ -120,6 +167,31 @@ export function buildDebateRoundPrompt(
 }
 
 /**
+ * Deterministically select which panel members act as devil's advocates in a
+ * debate round. Picks `ceil(fraction * n)` models by even spacing across the
+ * (stably sorted) model list so the choice is reproducible and provider-diverse
+ * rather than always hitting the first few. `fraction <= 0` selects none;
+ * `fraction >= 1` selects all but one (never the whole panel — at least one
+ * collaborative voice must remain or the round degenerates into pure objection).
+ *
+ * Pure + deterministic → unit-testable without any model call.
+ */
+export function selectDevilsAdvocates(models: string[], fraction: number): Set<string> {
+  const n = models.length;
+  if (n < 3 || !Number.isFinite(fraction) || fraction <= 0) return new Set();
+  // Cap at n-1 so the panel never becomes all-contrarian.
+  const count = Math.min(n - 1, Math.max(1, Math.ceil(fraction * n)));
+  // Even spacing: pick indices 0, step, 2*step, … over a stable ordering.
+  const ordered = [...models].sort();
+  const step = n / count;
+  const chosen = new Set<string>();
+  for (let k = 0; k < count; k++) {
+    chosen.add(ordered[Math.min(n - 1, Math.floor(k * step))]);
+  }
+  return chosen;
+}
+
+/**
  * Final judge prompt shown after all debate rounds.
  * The judge sees the full debate history (all rounds, all peers), traces how
  * consensus emerged, and writes ONE authoritative final answer grounded in
@@ -128,9 +200,7 @@ export function buildDebateRoundPrompt(
 export function buildDebateJudgePrompt(history: DebateHistory): string {
   const rounds = history
     .map((round, ri) => {
-      const entries = round
-        .map((a, pi) => `[Peer ${pi + 1}, Round ${ri}]\n${a.text}`)
-        .join("\n\n");
+      const entries = round.map((a, pi) => `[Peer ${pi + 1}, Round ${ri}]\n${a.text}`).join("\n\n");
       return `--- Round ${ri} ---\n${entries}`;
     })
     .join("\n\n");
@@ -161,6 +231,72 @@ export function buildDebateJudgePrompt(history: DebateHistory): string {
     "=== END TRANSCRIPT ===",
     "",
     "Now write the best possible final answer to the user's original request — more complete and correct than any single debater, and than the panel as a whole. No filler, no meta-commentary.",
+  ].join("\n");
+}
+
+/**
+ * Evaluator prompt for the (opt-in) verify pass. Shows the judge's DRAFT answer
+ * to an independent critic model whose ONLY job is to find what is wrong or
+ * missing — the "evaluator" half of Anthropic's evaluator-optimizer pattern.
+ * It is deliberately adversarial: praise is worthless here, only actionable
+ * defects move the answer forward. Returns a critique the refine step consumes.
+ *
+ * Pure: formats a prompt string, unit-testable without a model call.
+ */
+export function buildVerifyPrompt(draftAnswer: string): string {
+  return [
+    "You are a rigorous fact-checker and editor reviewing a DRAFT answer before it",
+    "is delivered. Your job is NOT to rewrite it and NOT to praise it — only to find",
+    "what would make it wrong, incomplete, or misleading for the user.",
+    "",
+    "Check specifically for:",
+    "• Factual errors or unsupported claims stated as fact.",
+    "• Logical gaps, contradictions, or unjustified leaps.",
+    "• Missing caveats, edge cases, or important context the user needs.",
+    "• Questions the user implicitly asked that the draft leaves unanswered.",
+    "",
+    "If the draft is genuinely sound, say so in one line. Otherwise, output a short,",
+    "specific, prioritized list of concrete defects — each one actionable enough that",
+    "an editor could fix it without guessing what you meant. No filler.",
+    "",
+    "=== DRAFT ANSWER ===",
+    draftAnswer,
+    "=== END DRAFT ===",
+    "",
+    "Now list the defects (or confirm the draft is sound):",
+  ].join("\n");
+}
+
+/**
+ * Optimizer prompt for the (opt-in) verify pass. Hands the judge's own DRAFT plus
+ * the evaluator's critique back to the judge to produce the FINAL answer — the
+ * "optimizer" half of evaluator-optimizer. The judge stays the authority: it
+ * applies its own judgment to the critique, incorporating valid defects and
+ * explicitly rejecting any it finds wrong, rather than blindly accepting them.
+ *
+ * Pure: formats a prompt string, unit-testable without a model call.
+ */
+export function buildRefinePrompt(draftAnswer: string, critique: string): string {
+  return [
+    "Below is a DRAFT answer you wrote, followed by an independent reviewer's",
+    "critique. Produce the FINAL answer for the user.",
+    "",
+    "You remain the authority: weigh each point of the critique on its merits.",
+    "Incorporate every valid correction and fill every genuine gap it identifies,",
+    "but if a critique point is itself mistaken, silently disregard it — do not",
+    "degrade a correct draft to satisfy a wrong objection. Do NOT mention the review,",
+    "the draft, or that any revision happened; write the final answer directly to the",
+    "user as a single authoritative response. No meta-commentary, no filler.",
+    "",
+    "=== YOUR DRAFT ===",
+    draftAnswer,
+    "=== END DRAFT ===",
+    "",
+    "=== REVIEWER CRITIQUE ===",
+    critique,
+    "=== END CRITIQUE ===",
+    "",
+    "Now write the final answer to the user's original request:",
   ].join("\n");
 }
 
@@ -206,6 +342,54 @@ export function measureConsensus(answers: PanelAnswer[]): number {
   for (let i = 0; i < sets.length; i++) {
     for (let j = i + 1; j < sets.length; j++) {
       sum += jaccard(sets[i], sets[j]);
+      pairs++;
+    }
+  }
+  return pairs === 0 ? 1 : sum / pairs;
+}
+
+/**
+ * Cosine similarity of two equal-length numeric vectors. Returns 0 when either
+ * vector is missing, empty, mismatched in length, or has zero magnitude — a
+ * conservative "no measurable agreement" default so a degenerate embedding can
+ * never inflate the consensus score. Range for real inputs: [-1, 1].
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  if (magA === 0 || magB === 0) return 0;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+/**
+ * Semantic analogue of {@link measureConsensus}: mean pairwise cosine similarity
+ * across per-answer embedding vectors, clamped to [0,1] (negative similarity —
+ * genuinely opposed answers — floors at 0 so it composes with the same
+ * `consensusThreshold`). This is the world-class upgrade over lexical Jaccard:
+ * two answers that agree in meaning but differ in wording score HIGH (Jaccard
+ * scored them low), and two that share vocabulary but contradict score LOW.
+ *
+ * Pure and deterministic given the vectors — the (impure) embedding call lives
+ * in `src/lib/council/semanticConsensus.ts`, which falls back to
+ * {@link measureConsensus} when no embedding provider is configured. `< 2`
+ * vectors → 1 (nothing to disagree about), matching the Jaccard contract.
+ */
+export function measureConsensusFromVectors(vectors: number[][]): number {
+  if (vectors.length < 2) return 1;
+  let sum = 0;
+  let pairs = 0;
+  for (let i = 0; i < vectors.length; i++) {
+    for (let j = i + 1; j < vectors.length; j++) {
+      const c = cosineSimilarity(vectors[i], vectors[j]);
+      sum += c < 0 ? 0 : c;
       pairs++;
     }
   }
@@ -317,19 +501,13 @@ export async function handleDebateChat({
       "DEBATE",
       `Combo "${comboName ?? ""}" panel=${panel.length} exceeds maxPanel=${maxPanel}`
     );
-    return errorResponse(
-      400,
-      `Debate panel too large (${panel.length} models, max ${maxPanel})`
-    );
+    return errorResponse(400, `Debate panel too large (${panel.length} models, max ${maxPanel})`);
   }
 
   const totalRounds = Math.max(1, tuning?.debateRounds ?? DEBATE_DEFAULTS.debateRounds);
   const consensusThreshold = tuning?.consensusThreshold ?? DEBATE_DEFAULTS.consensusThreshold;
   const cfg = {
-    minPanel: Math.min(
-      Math.max(1, tuning?.minPanel ?? DEBATE_DEFAULTS.minPanel),
-      panel.length
-    ),
+    minPanel: Math.min(Math.max(1, tuning?.minPanel ?? DEBATE_DEFAULTS.minPanel), panel.length),
     stragglerGraceMs: tuning?.stragglerGraceMs ?? DEBATE_DEFAULTS.stragglerGraceMs,
     panelHardTimeoutMs: tuning?.panelHardTimeoutMs ?? DEBATE_DEFAULTS.panelHardTimeoutMs,
   };
@@ -365,7 +543,10 @@ export async function handleDebateChat({
   for (let r = 1; r < totalRounds; r++) {
     const priorRound = history[history.length - 1];
     if (priorRound.length < 2) {
-      log.warn("DEBATE", `Round ${r}: only ${priorRound.length} survivor(s) — skipping remaining debate rounds`);
+      log.warn(
+        "DEBATE",
+        `Round ${r}: only ${priorRound.length} survivor(s) — skipping remaining debate rounds`
+      );
       break;
     }
 
@@ -407,7 +588,10 @@ export async function handleDebateChat({
         );
         break;
       }
-      log.info("DEBATE", `Round ${r}: consensus ${consensus.toFixed(3)} < ${consensusThreshold} — continuing`);
+      log.info(
+        "DEBATE",
+        `Round ${r}: consensus ${consensus.toFixed(3)} < ${consensusThreshold} — continuing`
+      );
     }
   }
 
